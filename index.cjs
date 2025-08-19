@@ -48,8 +48,13 @@ if (process.env.FB_SERVICE_ACCOUNT_JSON) {
   throw new Error('Missing FB_SERVICE_ACCOUNT_JSON or FB_SERVICE_ACCOUNT_PATH environment variable');
 }
 
+// Initialize Firebase Admin SDK. Include databaseURL so Realtime Database
+// operations (e.g. writing discordLinks) work correctly. When databaseURL
+// is undefined, admin.database() will attempt to infer the URL from the
+// service account project ID.
 admin.initializeApp({
   credential,
+  databaseURL: process.env.FB_DATABASE_URL,
 });
 
 const db = admin.firestore();
@@ -77,7 +82,7 @@ app.get('/discord-login-success', (req, res) => {
   // Base login URL for KC Events. If you change your KC Events domain or
   // path, update this constant accordingly.
   const baseLoginUrl =
-    'https://kcevents.uk/#loginpage';
+    'https://kevinmidnight7-sudo.github.io/messageboardkc/login.html';
   // Append the custom token as a query parameter if present. Many Firebase
   // client apps expect a token parameter named `token`, but adjust as needed.
   const loginUrl = token
@@ -260,6 +265,20 @@ app.get('/oauth/discord/callback', async (req, res) => {
     // Issue a Firebase custom token for this user. Include discordId in the
     // developer claims so it’s available in ID tokens.
     const uid = userDoc.id;
+    // Persist a mapping in the Realtime Database so the Discord bot can
+    // quickly look up the KC uid for a given Discord snowflake. We also
+    // mirror the discordId into the user's realtime profile to match the
+    // website's data model. Any errors here should not block the overall
+    // linking flow.
+    try {
+      const rtdb = admin.database();
+      // Save reverse link: discordId → uid
+      await rtdb.ref(`discordLinks/${discordId}`).set({ uid, linkedAt: Date.now() });
+      // Save forward link on the user record
+      await rtdb.ref(`users/${uid}/discordId`).set(discordId);
+    } catch (dbErr) {
+      console.error('Realtime DB update failed', dbErr);
+    }
     const customToken = await admin
       .auth()
       .createCustomToken(uid, { discordId });

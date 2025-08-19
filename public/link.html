@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Link KC Events Account</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+    <style>
+        body {
+            font-family: 'Poppins', sans-serif;
+        }
+        .form-btn {
+            padding:.68rem; border:none; border-radius:7px;
+            font-size:1.08rem; font-weight:700; color:#fff;
+            cursor:pointer; transition:background .18s;
+            background:linear-gradient(90deg,#1ee57c,#50b2fa);
+            box-shadow: 0 4px 12px rgba(30,229,124,0.3);
+        }
+        .form-btn:hover {
+            background:linear-gradient(90deg,#19df7e,#30a9f8);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(30,229,124,0.4);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
+
+    <div id="app" class="w-full max-w-md p-8 space-y-6 bg-gray-800 rounded-lg shadow-lg text-center">
+
+        <!-- Loading State -->
+        <div id="loadingState">
+            <h1 class="text-2xl font-bold">Connecting...</h1>
+            <p class="text-gray-400">Please wait while we check your session.</p>
+        </div>
+
+        <!-- Login State -->
+        <div id="loginState" style="display: none;">
+            <h1 class="text-2xl font-bold">Link Your Account</h1>
+            <p class="text-gray-400 mb-4">Please log in to your KC Events account to continue.</p>
+            <div class="space-y-4">
+                <input id="loginEmail" type="email" placeholder="Email" class="w-full px-4 py-2 text-gray-900 bg-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <input id="loginPass" type="password" placeholder="Password" class="w-full px-4 py-2 text-gray-900 bg-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <button id="loginBtn" class="w-full form-btn">Log In & Link Account</button>
+                <p id="loginError" class="text-red-400 text-sm"></p>
+            </div>
+        </div>
+
+        <!-- Confirm State -->
+        <div id="confirmState" style="display: none;">
+            <h1 class="text-2xl font-bold">Confirm Linking</h1>
+            <p class="text-gray-400">You are logged in as:</p>
+            <p id="kcUsername" class="text-xl font-semibold text-indigo-400 my-2"></p>
+            <p class="text-gray-400 mb-4">Do you want to link this KC account to your Discord profile?</p>
+            <button id="confirmLinkBtn" class="w-full form-btn">Yes, Link Accounts</button>
+        </div>
+
+        <!-- Success/Error State -->
+        <div id="finalState" style="display: none;">
+            <h1 id="finalTitle" class="text-2xl font-bold"></h1>
+            <p id="finalMessage" class="text-gray-400"></p>
+        </div>
+    </div>
+
+    <script>
+        // ========== FIREBASE INIT ==========
+        const cfg = {
+            apiKey: "AIzaSyBHKsULqmWPFaU7bNXDp6pBZHO4p9ZiUUo",
+            authDomain: "kckillerscompany-ab1ec.firebaseapp.com",
+            databaseURL: "https://kckillerscompany-ab1ec-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "kckillerscompany-ab1ec",
+            storageBucket: "kckillerscompany-ab1ec.appspot.com",
+        };
+        firebase.initializeApp(cfg);
+        const auth = firebase.auth();
+        const db = firebase.database();
+
+        // ========== UI ELEMENTS ==========
+        const loadingState = document.getElementById('loadingState');
+        const loginState = document.getElementById('loginState');
+        const confirmState = document.getElementById('confirmState');
+        const finalState = document.getElementById('finalState');
+        const loginBtn = document.getElementById('loginBtn');
+        const confirmLinkBtn = document.getElementById('confirmLinkBtn');
+        const loginError = document.getElementById('loginError');
+
+        // ========== CORE LOGIC ==========
+        // Get Discord ID from the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const discordId = urlParams.get('state');
+
+        function showState(state) {
+            loadingState.style.display = 'none';
+            loginState.style.display = 'none';
+            confirmState.style.display = 'none';
+            finalState.style.display = 'none';
+            document.getElementById(state).style.display = 'block';
+        }
+
+        function showFinalMessage(title, message) {
+            document.getElementById('finalTitle').textContent = title;
+            document.getElementById('finalMessage').textContent = message;
+            showState('finalState');
+        }
+
+        // Check if Discord ID is valid
+        if (!discordId || !/^\d{17,20}$/.test(discordId)) {
+            showFinalMessage('Error', 'Invalid or missing Discord ID. Please try running /link from Discord again.');
+        }
+
+        // Listen for Firebase auth state changes
+        auth.onAuthStateChanged(user => {
+            if (user) {
+                // User is logged in, show confirmation screen
+                document.getElementById('kcUsername').textContent = user.displayName || user.email;
+                showState('confirmState');
+            } else {
+                // User is not logged in, show login form
+                showState('loginState');
+            }
+        });
+
+        // Handle Login Button Click
+        loginBtn.onclick = () => {
+            const email = document.getElementById('loginEmail').value;
+            const pass = document.getElementById('loginPass').value;
+            loginError.textContent = '';
+
+            if (!email || !pass) {
+                loginError.textContent = 'Please enter email and password.';
+                return;
+            }
+
+            auth.signInWithEmailAndPassword(email, pass)
+                .catch(error => {
+                    loginError.textContent = error.message;
+                });
+        };
+
+        // Handle Confirm Button Click
+        confirmLinkBtn.onclick = async () => {
+            const user = auth.currentUser;
+            if (!user) {
+                showFinalMessage('Error', 'You are not logged in. Please refresh and try again.');
+                return;
+            }
+
+            const kcUid = user.uid;
+
+            // Write the link to Firebase Realtime Database
+            try {
+                await db.ref(`discordLinks/${discordId}`).set({
+                    uid: kcUid,
+                    linkedAt: firebase.database.ServerValue.TIMESTAMP,
+                });
+                showFinalMessage('Success!', 'Your KC Events and Discord accounts have been linked. You can now close this window.');
+            } catch (error) {
+                showFinalMessage('Database Error', 'Could not save the link. Please try again.');
+                console.error('Firebase write error:', error);
+            }
+        };
+
+    </script>
+</body>
+</html>

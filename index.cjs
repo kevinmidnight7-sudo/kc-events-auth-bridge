@@ -8,23 +8,20 @@ const admin = require('firebase-admin');
  * to an existing KC Events profile stored in Firestore. The flow works as
  * follows:
  *
- * 1) A slash command in the Discord bot generates a random state ID and
- *    writes a document to the `linkStates/{state}` collection containing
- *    metadata (createdAt, used flag, and the user ID who initiated the link).
+ * 1) A user action (e.g., in a web UI) generates a URL pointing at
+ * `/oauth/discord/start?state=<discord_id>`. When the user clicks the link,
+ * it redirects them to Discord’s OAuth2 authorize endpoint. The only scope
+ * requested is `identify` – this is enough to retrieve the user’s ID and
+ * username. The user's Discord ID is passed through the `state` parameter.
  *
- * 2) The slash command replies with a URL pointing at
- *    `/oauth/discord/start?state=<state>`. When the user clicks the link it
- *    redirects them to Discord’s OAuth2 authorize endpoint. The only scope
- *    requested is `identify` – this is enough to retrieve the user’s ID and
- *    username.
- *
- * 3) After the user authorizes, Discord calls back to
- *    `/oauth/discord/callback?code=...&state=...`. The bridge exchanges the
- *    code for an access token, fetches the user profile from Discord, finds
- *    (or creates) a Firestore `users/{uid}` document, updates it with
- *    `discordId`, `discordUsername` and `discordAvatarURL`, marks the state
- *    document as used, issues a Firebase custom token for the KC user and
- *    finally redirects the user to `PUBLIC_WEB_SUCCESS_URL?customToken=<token>`.
+ * 2) After the user authorizes, Discord calls back to
+ * `/oauth/discord/callback?code=...&state=<discord_id>`. The bridge
+ * exchanges the code for an access token, fetches the user profile from
+ * Discord, finds (or creates) a Firestore `users/{uid}` document, updates
+ * it with the Discord profile info, writes a mapping to the Realtime
+ * Database (`discordLinks/{discordId}` -> `{uid}`), issues a Firebase
+ * custom token for the KC user, and finally redirects the user to
+ * `PUBLIC_WEB_SUCCESS_URL?customToken=<token>`.
  */
 
 // Load service account credentials for Firebase Admin SDK. Two methods
@@ -138,38 +135,33 @@ app.get('/discord-login-error', (req, res) => {
   res.set('Content-Type', 'text/html').send(html);
 });
 
-// GET /oauth/discord/start
-// Validate the provided state and redirect the user to Discord’s OAuth2
-// authorize page. This endpoint is linked from the bot’s /link command.
+// =============================================================================
+// CHANGE 1: /oauth/discord/start handler updated
+// This handler now accepts a Discord ID directly as the state parameter.
+// =============================================================================
 app.get('/oauth/discord/start', async (req, res) => {
   try {
-    const { state } = req.query;
-    if (!state) {
-      return res.status(400).send('Missing state');
+    const state = String(req.query.state || '').trim();
+
+    // Basic sanity check: Discord snowflakes are 17–20 digits
+    if (!/^\d{17,20}$/.test(state)) {
+      return res.status(400).send('Bad state');
     }
-    const doc = await db.collection('linkStates').doc(String(state)).get();
-    if (!doc.exists) {
-      return res.status(400).send('Unknown state');
-    }
-    const data = doc.data();
-    // Ensure the state hasn’t been used and hasn’t expired (10 min expiry is
-    // enforced by the bot but double‑check here). We allow a 15 minute window
-    // just in case.
-    const maxAgeMs = 15 * 60 * 1000;
-    if (data.used || (Date.now() - data.createdAt) > maxAgeMs) {
-      return res.status(400).send('State expired or already used');
-    }
-    // Build the Discord authorize URL. Only the identify scope is requested.
-    const discordAuthURL = new URL('https://discord.com/api/oauth2/authorize');
-    discordAuthURL.searchParams.set('client_id', process.env.DISCORD_CLIENT_ID);
-    discordAuthURL.searchParams.set('redirect_uri', process.env.DISCORD_REDIRECT_URI);
-    discordAuthURL.searchParams.set('response_type', 'code');
-    discordAuthURL.searchParams.set('scope', 'identify');
-    discordAuthURL.searchParams.set('state', state);
-    return res.redirect(discordAuthURL.toString());
+
+    const params = new URLSearchParams({
+      client_id: process.env.DISCORD_CLIENT_ID,
+      redirect_uri: process.env.DISCORD_REDIRECT_URI, // e.g. https://auth.kcevents.uk/oauth/discord/callback
+      response_type: 'code',
+      scope: 'identify',
+      state,                 // pass the discordId through unchanged
+      prompt: 'consent'
+    });
+
+    const authorizeUrl = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
+    return res.redirect(authorizeUrl);
   } catch (err) {
-    console.error(err);
-    return res.status(500).send('Internal error');
+    console.error('start error:', err);
+    return res.status(500).send('Start error');
   }
 });
 
@@ -194,11 +186,10 @@ app.get('/oauth/discord/callback', async (req, res) => {
     if (!code || !state) {
       return res.status(400).send('Missing code or state');
     }
-    const stateRef = db.collection('linkStates').doc(String(state));
-    const stateSnap = await stateRef.get();
-    if (!stateSnap.exists || stateSnap.data().used) {
-      return res.status(400).send('Invalid or used state');
-    }
+
+    // The old state validation logic has been removed as we now pass the
+    // Discord ID directly.
+
     // Exchange the authorization code for an access token
     const tokenRes = await postForm('https://discord.com/api/oauth2/token', {
       client_id: process.env.DISCORD_CLIENT_ID,
@@ -213,6 +204,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
     }
     const tokenData = await tokenRes.json();
     const accessToken = tokenData.access_token;
+
     // Fetch the user’s Discord profile
     const userRes = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -221,33 +213,33 @@ app.get('/oauth/discord/callback', async (req, res) => {
       console.error('Failed to fetch Discord user', await userRes.text());
       return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/');
     }
-    const me = await userRes.json();
-    const discordId = String(me.id);
-    const discordUsername = me.username;
-    const avatarHash = me.avatar;
+    const discordUser = await userRes.json(); // Renamed to discordUser for clarity
+    const discordIdFromApi = String(discordUser.id);
+    const discordUsername = discordUser.username;
+    const avatarHash = discordUser.avatar;
     const avatarUrl = avatarHash
-      ? `https://cdn.discordapp.com/avatars/${discordId}/${avatarHash}.png`
+      ? `https://cdn.discordapp.com/avatars/${discordIdFromApi}/${avatarHash}.png`
       : null;
+
     // Look up existing KC user by discordId
     let userDoc = null;
     const snap = await db
       .collection('users')
-      .where('discordId', '==', discordId)
+      .where('discordId', '==', discordIdFromApi)
       .limit(1)
       .get();
     if (!snap.empty) {
       userDoc = snap.docs[0];
     }
-    // If no existing user, create a new one using a random doc ID. In a real
-    // application you may want to handle linking to an existing KC user in a
-    // more controlled manner.
+
+    // If no existing user, create a new one.
     if (!userDoc) {
       const newRef = db.collection('users').doc();
       await newRef.set({
         displayName: discordUsername,
         username: discordUsername,
         joined: Date.now(),
-        discordId: discordId,
+        discordId: discordIdFromApi,
         discordUsername: discordUsername,
         discordAvatarURL: avatarUrl,
       });
@@ -255,33 +247,46 @@ app.get('/oauth/discord/callback', async (req, res) => {
     } else {
       // Update the existing document with current Discord info
       await userDoc.ref.update({
-        discordId: discordId,
+        discordId: discordIdFromApi,
         discordUsername: discordUsername,
         discordAvatarURL: avatarUrl,
       });
     }
-    // Mark state as used
-    await stateRef.update({ used: true });
-    // Issue a Firebase custom token for this user. Include discordId in the
-    // developer claims so it’s available in ID tokens.
+
     const uid = userDoc.id;
-    // Persist a mapping in the Realtime Database so the Discord bot can
-    // quickly look up the KC uid for a given Discord snowflake. We also
-    // mirror the discordId into the user's realtime profile to match the
-    // website's data model. Any errors here should not block the overall
-    // linking flow.
-    try {
-      const rtdb = admin.database();
-      // Save reverse link: discordId → uid
-      await rtdb.ref(`discordLinks/${discordId}`).set({ uid, linkedAt: Date.now() });
-      // Save forward link on the user record
-      await rtdb.ref(`users/${uid}/discordId`).set(discordId);
-    } catch (dbErr) {
-      console.error('Realtime DB update failed', dbErr);
+
+    // =============================================================================
+    // CHANGE 2: Read state as Discord ID and save the mapping
+    // This block reads the state from the callback, validates it as a Discord ID,
+    // and writes the mapping to the Realtime Database.
+    // =============================================================================
+    const discordIdFromState = String(req.query.state || '').trim();
+    const discordId = /^\d{17,20}$/.test(discordIdFromState)
+      ? discordIdFromState
+      : (discordUser?.id || '');
+
+    // If we still don't have a valid discordId, bail
+    if (!/^\d{17,20}$/.test(discordId)) {
+      return res.status(400).send('Missing discord id');
     }
+
+    // Write mapping into RTDB so bot can resolve quickly
+    await admin.database().ref(`discordLinks/${discordId}`).set({
+      uid,
+      linkedAt: Date.now(),
+    });
+
+    // Optional mirror on the user
+    await admin.database().ref(`users/${uid}/linkedDiscordId`).set(discordId);
+    // =============================================================================
+    // End of Change 2
+    // =============================================================================
+
+    // Issue a Firebase custom token for this user.
     const customToken = await admin
       .auth()
       .createCustomToken(uid, { discordId });
+
     // Redirect to success URL with the custom token appended
     const successUrl = new URL(process.env.PUBLIC_WEB_SUCCESS_URL);
     successUrl.searchParams.set('customToken', customToken);

@@ -138,167 +138,65 @@ app.get('/discord-login-error', (req, res) => {
   res.set('Content-Type', 'text/html').send(html);
 });
 
-// =============================================================================
-// CHANGE 1: /oauth/discord/start handler updated
 // This handler now accepts a Discord ID directly as the state parameter.
-// =============================================================================
 app.get('/oauth/discord/start', async (req, res) => {
-  try {
-    const state = String(req.query.state || '').trim();
+  const state = String(req.query.state || '').trim();
+  if (!/^\d{17,20}$/.test(state)) return res.status(400).send('Bad state');
 
-    // Basic sanity check: Discord snowflakes are 17–20 digits
-    if (!/^\d{17,20}$/.test(state)) {
-      return res.status(400).send('Bad state');
-    }
+  const params = new URLSearchParams({
+    client_id: process.env.DISCORD_CLIENT_ID,
+    redirect_uri: process.env.DISCORD_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'identify',
+    state,
+    prompt: 'consent'
+  });
 
-    const params = new URLSearchParams({
-      client_id: process.env.DISCORD_CLIENT_ID,
-      redirect_uri: process.env.DISCORD_REDIRECT_URI, // e.g. https://auth.kcevents.uk/oauth/discord/callback
-      response_type: 'code',
-      scope: 'identify',
-      state,                 // pass the discordId through unchanged
-      prompt: 'consent'
-    });
-
-    const authorizeUrl = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
-    return res.redirect(authorizeUrl);
-  } catch (err) {
-    console.error('start error:', err);
-    return res.status(500).send('Start error');
-  }
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
 });
 
-// Helper function to perform POST requests with form data
-async function postForm(url, params) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams(params),
-  });
-  return response;
-}
-
-// GET /oauth/discord/callback
-// Handle the OAuth2 callback. Exchange the code for tokens, fetch the
-// Discord user, update Firestore and issue a custom token.
+// NEW: /oauth/discord/callback handler
+// This version just exchanges the code and redirects to the link page.
 app.get('/oauth/discord/callback', async (req, res) => {
   try {
-    const { code, state } = req.query;
-    if (!code || !state) {
-      return res.status(400).send('Missing code or state');
-    }
+    const code  = String(req.query.code || '');
+    const state = String(req.query.state || ''); // original discordId passed through
 
-    // The old state validation logic has been removed as we now pass the
-    // Discord ID directly.
+    if (!code || !state) return res.status(400).send('Missing code or state');
 
-    // Exchange the authorization code for an access token
-    const tokenRes = await postForm('https://discord.com/api/oauth2/token', {
-      client_id: process.env.DISCORD_CLIENT_ID,
-      client_secret: process.env.DISCORD_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: process.env.DISCORD_REDIRECT_URI,
+    // 1) Exchange code -> token (to validate the flow)
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.DISCORD_CLIENT_ID,
+        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: process.env.DISCORD_REDIRECT_URI
+      })
     });
     if (!tokenRes.ok) {
       console.error('Token exchange failed', await tokenRes.text());
-      return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/');
-    }
-    const tokenData = await tokenRes.json();
-    const accessToken = tokenData.access_token;
-
-    // Fetch the user’s Discord profile
-    const userRes = await fetch('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!userRes.ok) {
-      console.error('Failed to fetch Discord user', await userRes.text());
-      return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/');
-    }
-    const discordUser = await userRes.json(); // Renamed to discordUser for clarity
-    const discordIdFromApi = String(discordUser.id);
-    const discordUsername = discordUser.username;
-    const avatarHash = discordUser.avatar;
-    const avatarUrl = avatarHash
-      ? `https://cdn.discordapp.com/avatars/${discordIdFromApi}/${avatarHash}.png`
-      : null;
-
-    // Look up existing KC user by discordId
-    let userDoc = null;
-    const snap = await db
-      .collection('users')
-      .where('discordId', '==', discordIdFromApi)
-      .limit(1)
-      .get();
-    if (!snap.empty) {
-      userDoc = snap.docs[0];
+      return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/discord-login-error');
     }
 
-    // If no existing user, create a new one.
-    if (!userDoc) {
-      const newRef = db.collection('users').doc();
-      await newRef.set({
-        displayName: discordUsername,
-        username: discordUsername,
-        joined: Date.now(),
-        discordId: discordIdFromApi,
-        discordUsername: discordUsername,
-        discordAvatarURL: avatarUrl,
-      });
-      userDoc = await newRef.get();
-    } else {
-      // Update the existing document with current Discord info
-      await userDoc.ref.update({
-        discordId: discordIdFromApi,
-        discordUsername: discordUsername,
-        discordAvatarURL: avatarUrl,
-      });
-    }
+    // 2) (Optional) you can fetch /users/@me here if you want to log it:
+    // const { access_token, token_type } = await tokenRes.json();
+    // const me = await fetch('https://discord.com/api/users/@me', {
+    //   headers: { Authorization: `${token_type} ${access_token}` }
+    // }).then(r => r.json());
+    // console.log('Discord user:', me);
 
-    const uid = userDoc.id;
-
-    // =============================================================================
-    // CHANGE 2: Read state as Discord ID and save the mapping
-    // This block reads the state from the callback, validates it as a Discord ID,
-    // and writes the mapping to the Realtime Database.
-    // =============================================================================
-    const discordIdFromState = String(req.query.state || '').trim();
-    const discordId = /^\d{17,20}$/.test(discordIdFromState)
-      ? discordIdFromState
-      : (discordUser?.id || '');
-
-    // If we still don't have a valid discordId, bail
-    if (!/^\d{17,20}$/.test(discordId)) {
-      return res.status(400).send('Missing discord id');
-    }
-
-    // Write mapping into RTDB so bot can resolve quickly
-    await admin.database().ref(`discordLinks/${discordId}`).set({
-      uid,
-      linkedAt: Date.now(),
-    });
-
-    // Optional mirror on the user
-    await admin.database().ref(`users/${uid}/linkedDiscordId`).set(discordId);
-    // =============================================================================
-    // End of Change 2
-    // =============================================================================
-
-    // Issue a Firebase custom token for this user.
-    const customToken = await admin
-      .auth()
-      .createCustomToken(uid, { discordId });
-
-    // Redirect to success URL with the custom token appended
-    const successUrl = new URL(process.env.PUBLIC_WEB_SUCCESS_URL);
-    successUrl.searchParams.set('customToken', customToken);
-    return res.redirect(successUrl.toString());
+    // 3) Redirect user to the KC login/confirm page to finish linking
+    const target = `https://auth.kcevents.uk/link.html?state=${encodeURIComponent(state)}&ok=1`;
+    return res.redirect(target);
   } catch (err) {
-    console.error(err);
-    return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/');
+    console.error('callback error:', err);
+    return res.redirect(process.env.PUBLIC_WEB_ERROR_URL || '/discord-login-error');
   }
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

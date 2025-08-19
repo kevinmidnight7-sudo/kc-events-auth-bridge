@@ -58,6 +58,9 @@ const db = admin.firestore();
 
 const app = express();
 
+// Serve static files from the 'public' directory
+app.use(express.static('public'));
+
 // -----------------------------------------------------------------------------
 // Custom success and error pages for Discord account linking
 //

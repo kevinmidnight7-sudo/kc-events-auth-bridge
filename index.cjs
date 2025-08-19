@@ -77,7 +77,7 @@ app.get('/discord-login-success', (req, res) => {
   // Base login URL for KC Events. If you change your KC Events domain or
   // path, update this constant accordingly.
   const baseLoginUrl =
-    'https://kevinmidnight7-sudo.github.io/messageboardkc/login.html';
+    'https://kcevents.uk/#loginpage';
   // Append the custom token as a query parameter if present. Many Firebase
   // client apps expect a token parameter named `token`, but adjust as needed.
   const loginUrl = token

@@ -14,14 +14,14 @@
  *      /start    → validates linkStates/{state} doc exists, not used, not expired
  *      /callback → reads linkStates/{state}.uid (kcUid), marks doc used,
  *                  writes Firestore users/{uid}.discordId + RTDB users/{uid}/discordId +
- *                  RTDB discordLinks/{discordId}, issues custom Firebase Auth token,
- *                  redirects to PUBLIC_WEB_SUCCESS_URL?customToken=<token>
+ *                  RTDB discordLinks/{discordId}, redirects to PUBLIC_WEB_SUCCESS_URL
  */
 
 'use strict';
 const express      = require('express');
 const admin        = require('firebase-admin');
 const path         = require('path');
+// fetch is built into Node.js 18+ — no import needed
 
 const app = express();
 
@@ -29,8 +29,6 @@ const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Firebase Admin ────────────────────────────────────────────────────────────
-// FB_SERVICE_ACCOUNT_JSON: the full service account JSON as a string (Render env var)
-// FB_DATABASE_URL: the Realtime Database URL (Render env var)
 if (!admin.apps.length) {
     const serviceAccount = JSON.parse(process.env.FB_SERVICE_ACCOUNT_JSON);
     admin.initializeApp({
@@ -45,7 +43,7 @@ const rtdb = admin.database();
 const CLIENT_ID          = process.env.DISCORD_CLIENT_ID;
 const CLIENT_SECRET      = process.env.DISCORD_CLIENT_SECRET;
 const REDIRECT_URI       = process.env.DISCORD_REDIRECT_URI;
-const PUBLIC_WEB_SUCCESS = process.env.PUBLIC_WEB_SUCCESS_URL || 'https://kevinmidnight7-sudo.github.io/messageboardkc/kcnow.html';
+const PUBLIC_WEB_SUCCESS = process.env.PUBLIC_WEB_SUCCESS_URL || 'https://kcevents.uk/#kcnow';
 const PORT               = process.env.PORT || 3000;
 
 const LINK_STATE_TTL_MS  = 15 * 60 * 1000; // 15 minutes
@@ -100,13 +98,12 @@ app.get('/oauth/discord/callback', async (req, res) => {
 
     if (isDiscordIdState) {
         // ── Legacy bot flow ───────────────────────────────────────────────────
-        // state = Discord user ID. No API calls needed — redirect straight to
-        // link.html which handles everything for this flow.
+        // Redirect straight to link.html — no API calls needed for this flow
         const target = `https://auth.kcevents.uk/link.html?state=${encodeURIComponent(state)}&ok=1`;
         return res.redirect(target);
     }
 
-    // ── Web UI flow only: exchange code + fetch Discord identity ─────────────
+    // ── Web UI flow: exchange code + fetch Discord identity ───────────────────
     let accessToken;
     try {
         const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
@@ -181,16 +178,9 @@ app.get('/oauth/discord/callback', async (req, res) => {
         return res.status(500).send('Failed to save link');
     }
 
-    // Issue custom Firebase Auth token and redirect back to KC NOW
-    let customToken;
-    try {
-        customToken = await admin.auth().createCustomToken(kcUid, { discordId });
-    } catch (err) {
-        console.error('[callback] Custom token error:', err);
-        return res.status(500).send('Failed to issue token');
-    }
-
-    return res.redirect(`${PUBLIC_WEB_SUCCESS}?customToken=${encodeURIComponent(customToken)}`);
+    // Discord ID saved — redirect back to KC NOW
+    // kcnow.html shows success toast via the kc-discord-link-pending localStorage flag
+    return res.redirect(PUBLIC_WEB_SUCCESS);
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────

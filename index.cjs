@@ -6,7 +6,7 @@
  *   A) Legacy bot flow:  state = Discord user ID (17-20 digits)
  *      The Discord bot initiates the OAuth flow and passes the user's Discord ID as state.
  *      /start    → validates state matches /^\d{17,20}$/, redirects to Discord OAuth
- *      /callback → exchanges code, redirects to link.html?state=<discordId>&ok=1
+ *      /callback → redirects to link.html?state=<discordId>&ok=1
  *                  (link.html / the bot handles the actual Firebase writes for this flow)
  *
  *   B) Web UI flow (kcnow.html):  state = Firestore linkStates document ID (random alphanumeric)
@@ -22,8 +22,12 @@
 const express      = require('express');
 const fetch        = require('node-fetch');
 const admin        = require('firebase-admin');
+const path         = require('path');
 
 const app = express();
+
+// Serve static files (link.html, discord-login-success.html, etc.)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Firebase Admin ────────────────────────────────────────────────────────────
 // FB_SERVICE_ACCOUNT_JSON: the full service account JSON as a string (Render env var)
@@ -97,8 +101,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
 
     if (isDiscordIdState) {
         // ── Legacy bot flow ───────────────────────────────────────────────────
-        // state = the Discord user's Discord ID. The bot already knows who is linking.
-        // We don't need to exchange the code or fetch the user — just redirect to
+        // state = Discord user ID. No API calls needed — redirect straight to
         // link.html which handles everything for this flow.
         const target = `https://auth.kcevents.uk/link.html?state=${encodeURIComponent(state)}&ok=1`;
         return res.redirect(target);
@@ -157,7 +160,6 @@ app.get('/oauth/discord/callback', async (req, res) => {
         const createdMs = data.createdAt?.toMillis?.() || (data.createdAt?._seconds * 1000) || 0;
         if (data.used) return res.status(400).send('State already used');
         if (Date.now() - createdMs > LINK_STATE_TTL_MS) return res.status(400).send('State expired');
-
         kcUid = data.uid;
         await docRef.update({ used: true });
     } catch (err) {

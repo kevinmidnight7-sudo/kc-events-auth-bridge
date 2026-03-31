@@ -20,7 +20,6 @@
 
 'use strict';
 const express      = require('express');
-const fetch        = require('node-fetch');
 const admin        = require('firebase-admin');
 const path         = require('path');
 

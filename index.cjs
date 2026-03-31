@@ -14,7 +14,8 @@
  *      /start    → validates linkStates/{state} doc exists, not used, not expired
  *      /callback → reads linkStates/{state}.uid (kcUid), marks doc used,
  *                  writes Firestore users/{uid}.discordId + RTDB users/{uid}/discordId +
- *                  RTDB discordLinks/{discordId}, redirects to PUBLIC_WEB_SUCCESS_URL
+ *                  RTDB discordLinks/{discordId} = { uid, linkedAt },
+ *                  redirects to PUBLIC_WEB_SUCCESS_URL
  */
 
 'use strict';
@@ -163,13 +164,13 @@ app.get('/oauth/discord/callback', async (req, res) => {
         return res.status(500).send('Internal error');
     }
 
-    // Write Discord ID to Firestore + RTDB
+    // Write Discord ID to Firestore + RTDB (matching bot's data format)
     try {
         await Promise.all([
             fsdb.collection('users').doc(kcUid).set({ discordId }, { merge: true }),
             rtdb.ref(`users/${kcUid}/discordId`).set(discordId),
             rtdb.ref(`discordLinks/${discordId}`).set({
-                kcUid,
+                uid: kcUid,
                 linkedAt: admin.database.ServerValue.TIMESTAMP,
             }),
         ]);
@@ -179,7 +180,6 @@ app.get('/oauth/discord/callback', async (req, res) => {
     }
 
     // Discord ID saved — redirect back to KC NOW
-    // kcnow.html shows success toast via the kc-discord-link-pending localStorage flag
     return res.redirect(PUBLIC_WEB_SUCCESS);
 });
 

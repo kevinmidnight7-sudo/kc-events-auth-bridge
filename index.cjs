@@ -61,6 +61,7 @@ app.get('/oauth/discord/start', async (req, res) => {
     const isDiscordId = /^\d{17,20}$/.test(state);
 
     if (!isDiscordId) {
+        // Web UI flow — validate Firestore linkStates document
         try {
             const doc = await fsdb.collection('linkStates').doc(state).get();
             if (!doc.exists) return res.status(400).send('Unknown state');
@@ -94,6 +95,16 @@ app.get('/oauth/discord/callback', async (req, res) => {
 
     const isDiscordIdState = /^\d{17,20}$/.test(String(state).trim());
 
+    if (isDiscordIdState) {
+        // ── Legacy bot flow ───────────────────────────────────────────────────
+        // state = the Discord user's Discord ID. The bot already knows who is linking.
+        // We don't need to exchange the code or fetch the user — just redirect to
+        // link.html which handles everything for this flow.
+        const target = `https://auth.kcevents.uk/link.html?state=${encodeURIComponent(state)}&ok=1`;
+        return res.redirect(target);
+    }
+
+    // ── Web UI flow only: exchange code + fetch Discord identity ─────────────
     let accessToken;
     try {
         const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
@@ -135,13 +146,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
 
     const discordId = discordUser.id;
 
-    if (isDiscordIdState) {
-        // Legacy bot flow — just redirect to link.html, bot handles Firebase writes
-        const target = `https://auth.kcevents.uk/link.html?state=${encodeURIComponent(state)}&ok=1`;
-        return res.redirect(target);
-    }
-
-    // Web UI flow (Firestore linkStates)
+    // ── Firestore linkStates lookup ───────────────────────────────────────────
     const stateKey = String(state).trim();
     let kcUid;
     try {
@@ -152,6 +157,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
         const createdMs = data.createdAt?.toMillis?.() || (data.createdAt?._seconds * 1000) || 0;
         if (data.used) return res.status(400).send('State already used');
         if (Date.now() - createdMs > LINK_STATE_TTL_MS) return res.status(400).send('State expired');
+
         kcUid = data.uid;
         await docRef.update({ used: true });
     } catch (err) {
@@ -159,6 +165,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
         return res.status(500).send('Internal error');
     }
 
+    // Write Discord ID to Firestore + RTDB
     try {
         await Promise.all([
             fsdb.collection('users').doc(kcUid).set({ discordId }, { merge: true }),
@@ -173,6 +180,7 @@ app.get('/oauth/discord/callback', async (req, res) => {
         return res.status(500).send('Failed to save link');
     }
 
+    // Issue custom Firebase Auth token and redirect back to KC NOW
     let customToken;
     try {
         customToken = await admin.auth().createCustomToken(kcUid, { discordId });
